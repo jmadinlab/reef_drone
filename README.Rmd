@@ -1,0 +1,84 @@
+---
+output: github_document
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+```{r setup, echo = TRUE, message = FALSE}
+library(habtools)
+library(raster)
+library(tidyverse)
+library(Rvcg)
+library(sf)
+library(parallel)
+cl <- makeCluster(detectCores())
+
+```
+
+# Drone DEM
+
+```{r}
+# Load data
+dem0 <- raster("data/Underwater_DEM/site_4-04_time_08_DEM_1.22mm.tif")
+dem1 <- raster("data/Drone_DEM/Reef_42_2021_08_18_SFM_4_04_DEM.tif")
+grd <- st_read("data/Grid/grid_4-04.shp", quiet=TRUE)
+plot(dem1)
+
+# Find mid point from shapefile grid
+lat_mid <- st_bbox(grd)[2] + diff(c(st_bbox(grd)[2], st_bbox(grd)[4]))/2
+lon_mid <- st_bbox(grd)[1] + diff(c(st_bbox(grd)[1], st_bbox(grd)[3]))/2
+points(lon_mid, lat_mid)
+
+# Re-project DEM for meters?
+sr <- paste0("+proj=tmerc +lat_0=", lat_mid, " +lon_0=", lon_mid, " +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs")
+dem0_reproj <- projectRaster(dem0, crs=sr) # Will take ~1 minute
+dem1_reproj <- projectRaster(dem1, crs=sr)
+
+# Crop to 8 x 8 m
+dem0_crp <- dem_crop(dem0_reproj, x0=0, y0=0, L=8, plot=TRUE)
+dem1_crp <- dem_crop(dem1_reproj, x0=0, y0=0, L=8, plot=TRUE)
+
+# Checking resolution of layers
+res(dem0_crp)
+res(dem1_crp)
+
+# Change res of SfM to that of drone, for fair comparison. 
+r <- terra::project(terra::rast(dem0_crp), terra::rast(dem1_crp))
+dem0_crp_coarse <- raster::raster(r)
+
+res(dem0_crp_coarse)
+
+# crop into 16 boxes
+xy <- expand.grid(x0=c(-3, -1, 1, 3), y0=c(-3, -1, 1, 3))
+
+dem0_grd_coarse <- dem_crop(dem0_crp_coarse, x0=xy$x0, y0=xy$y0, L=2, plot=TRUE)
+dem0_grd <- dem_crop(dem0_crp, x0=xy$x0, y0=xy$y0, L=2, plot=TRUE)
+dem1_grd <- dem_crop(dem1_crp, x0=xy$x0, y0=xy$y0, L=2, plot=TRUE)
+
+# Calculate fractal dimesion
+data <- data.frame(box=1:16)
+data$D_sfm <- parSapply(cl, dem0_grd, function(x) { habtools::fd(x, method="hvar", lvec = habtools::extent(x) / c(1, 2, 4, 8, 16)) }) # 3D fractal dimension
+data$D_sfm_coarse <- parSapply(cl, dem0_grd_coarse, function(x) { habtools::fd(x, method="hvar", lvec = habtools::extent(x) / c(1, 2, 4, 8, 16)) }) # 3D fractal dimension
+data$D_drone <- parSapply(cl, dem1_grd, function(x) { habtools::fd(x, method="hvar", lvec = habtools::extent(x) / c(1, 2, 4, 8, 16)) }) # 3D fractal dimension
+
+# plots findings
+data2 <- data %>% pivot_longer(cols=D_sfm:D_sfm_coarse, names_to = "Resolution", values_to = "D_sfm")
+
+ggplot(data2) +
+  geom_point(aes(x=D_sfm, y=D_drone, col=Resolution)) +
+  xlim(1.9, 2.5) +
+  ylim(1.9, 2.4) +
+  geom_abline(intercept = 0, slope = 1) +
+  theme_classic()
+
+# histogram of differences
+hist(data$D_sfm - data$D_sfm_coarse)
+
+```
